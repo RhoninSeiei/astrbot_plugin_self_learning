@@ -190,14 +190,15 @@ class TestGoalManagerEmptyResponseShortCircuit:
         assert result["goal_type"] == "casual_chat"
         goal_manager.prompt_protection.sanitize_response.assert_not_called()
 
-    async def test_initial_goal_sanitized_to_empty(self, goal_manager):
+    async def test_initial_goal_plain_text_downgrades_without_chat_sanitizer(self, goal_manager):
         goal_manager.llm.refine_chat_completion = AsyncMock(return_value="some reply")
         goal_manager.prompt_protection.sanitize_response = MagicMock(
             return_value=("", {"leaks_removed": ["everything"]})
         )
         result = await goal_manager._analyze_initial_goal("你好")
         assert result["goal_type"] == "casual_chat"
-        assert result["reasoning"] == "模型回复消毒后无有效内容"
+        assert result["reasoning"] in {"无法识别明确目标", "分析失败"}
+        goal_manager.prompt_protection.sanitize_response.assert_not_called()
 
     async def test_intent_analysis_none_response(self, goal_manager):
         goal = {
@@ -212,7 +213,7 @@ class TestGoalManagerEmptyResponseShortCircuit:
         assert result["reasoning"] == "模型未返回有效分析结果"
         goal_manager.prompt_protection.sanitize_response.assert_not_called()
 
-    async def test_intent_analysis_sanitized_to_empty(self, goal_manager):
+    async def test_intent_analysis_plain_text_downgrades_without_chat_sanitizer(self, goal_manager):
         goal = {
             "final_goal": {"type": "casual_chat", "name": "闲聊", "topic": "日常", "topic_status": "active"},
             "current_stage": {"task": "破冰"},
@@ -225,4 +226,33 @@ class TestGoalManagerEmptyResponseShortCircuit:
         )
         result = await goal_manager._analyze_conversation_intent(goal, "你好", "你好呀")
         assert result["goal_switch_needed"] is False
-        assert result["reasoning"] == "模型回复消毒后无有效内容"
+        assert result["reasoning"] in {"无法识别明确目标", "分析失败"}
+        goal_manager.prompt_protection.sanitize_response.assert_not_called()
+
+    async def test_initial_goal_valid_json_uses_existing_schema_without_repair(self, goal_manager):
+        goal_manager.llm.refine_chat_completion = AsyncMock(
+            return_value='{"goal_type":"qa","topic":"排查","confidence":0.8,"reasoning":"询问原因"}'
+        )
+        result = await goal_manager._analyze_initial_goal("原因是什么")
+        assert result["goal_type"] == "qa"
+        assert result["confidence"] == 0.8
+        goal_manager.prompt_protection.wrap_prompt.assert_not_called()
+        goal_manager.prompt_protection.sanitize_response.assert_not_called()
+
+    async def test_intent_valid_json_uses_existing_schema_without_chat_styling(self, goal_manager):
+        goal = {
+            "final_goal": {"type": "qa", "name": "解答疑问", "topic": "排查"},
+            "current_stage": {"task": "理解问题"},
+            "planned_stages": ["理解问题", "确认结果"],
+            "conversation_history": [],
+        }
+        goal_manager.llm.refine_chat_completion = AsyncMock(
+            return_value='{"goal_switch_needed":false,"stage_completed":true,"user_engagement":0.8}'
+        )
+        result = await goal_manager._analyze_conversation_intent(goal, "解决了", "完成")
+        assert result["goal_switch_needed"] is False
+        assert result["stage_completed"] is True
+        assert result["user_engagement"] == 0.8
+        assert result["new_goal_type"] is None
+        goal_manager.prompt_protection.wrap_prompt.assert_not_called()
+        goal_manager.prompt_protection.sanitize_response.assert_not_called()

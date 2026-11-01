@@ -359,6 +359,52 @@ class V2LearningIntegration:
         await self.refresh_provider_bindings()
         return await self._trigger.process_message(message, group_id)
 
+    async def resume_scheduled_knowledge(self, allowed_groups: list, blocked_groups: list) -> None:
+        """Recover persisted queues after reload even without new raw samples."""
+        if self._config.knowledge_engine != "lightrag":
+            return
+        await self.refresh_provider_bindings()
+        manager = self._knowledge_manager
+        if manager is None:
+            return
+        allowed = {str(g) for g in allowed_groups}
+        blocked = {str(g) for g in blocked_groups}
+        for group_id in manager.persisted_group_ids():
+            if group_id in blocked or (allowed and group_id not in allowed):
+                continue
+            try:
+                await manager.resume_pending_knowledge(group_id)
+            except Exception as exc:
+                logger.warning("[V2Integration] Knowledge recovery failed group=%s error_type=%s", group_id, type(exc).__name__)
+
+    async def ingest_scheduled_knowledge(self, group_id: str, messages: list) -> dict:
+        """Knowledge-only batch handoff, independent of realtime/memory flags."""
+        if self._config.knowledge_engine != "lightrag":
+            return {}
+        await self.refresh_provider_bindings()
+        manager = self._knowledge_manager
+        if manager is None:
+            raise RuntimeError("LightRAG knowledge manager is not ready")
+        if not messages:
+            await manager.resume_pending_knowledge(group_id)
+            return {}
+        outcomes = {}
+        for row in messages:
+            if str(row.get("group_id", "")) != str(group_id):
+                raise ValueError("Scheduled knowledge group scope mismatch")
+            message = MessageData(
+                sender_id=str(row.get("sender_id", "")),
+                sender_name=str(row.get("sender_name") or row.get("sender_id", "")),
+                message=str(row.get("message", "")),
+                group_id=group_id,
+                timestamp=row.get("timestamp", 0),
+                platform=str(row.get("platform", "unknown")),
+            )
+            outcome = await manager.process_message_for_knowledge_graph(message, group_id)
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        logger.info("[V2Integration] Scheduled knowledge group=%s outcomes=%s", group_id, outcomes)
+        return outcomes
+
     @monitored
     async def get_enhanced_context(
         self,
