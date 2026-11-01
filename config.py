@@ -297,6 +297,9 @@ class PluginConfig(BaseModel):
     task_cancel_timeout: int = 3         # 后台任务取消等待超时
     service_stop_timeout: int = 5        # 单个服务停止超时
     enable_llm_hooks: bool = False       # 启用 LLM Hook 上下文注入，默认关闭以避免高频调用
+    llm_hook_allowed_sessions: List[str] = Field(default_factory=list)
+    llm_hook_include_v2: bool = True # 可关闭 V2 检索，仅注入本地学习上下文
+    llm_hook_local_only: bool = False # 禁用 Hook 触发的 V2 与行为指导模型调用
     llm_hook_context_timeout: float = 3.0  # LLM Hook 单个上下文源超时（秒）
     enable_command_pass_through: bool = True # 命令消息直接放行：跳过 LLM Hook 上下文注入，保证命令响应速度
 
@@ -424,6 +427,11 @@ class PluginConfig(BaseModel):
     @field_validator("target_blacklist", mode="before")
     @classmethod
     def _normalize_target_blacklist(cls, value) -> List[str]:
+        return normalize_identifier_list(value)
+
+    @field_validator("llm_hook_allowed_sessions", mode="before")
+    @classmethod
+    def _normalize_runtime_scope(cls, value) -> List[str]:
         return normalize_identifier_list(value)
 
     @field_validator("llm_hook_injection_target", mode="before")
@@ -688,6 +696,9 @@ class PluginConfig(BaseModel):
             task_cancel_timeout=runtime_internal_settings.get('task_cancel_timeout', 3),
             service_stop_timeout=runtime_internal_settings.get('service_stop_timeout', 5),
             enable_llm_hooks=runtime_internal_settings.get('enable_llm_hooks', False),
+            llm_hook_allowed_sessions=runtime_internal_settings.get('llm_hook_allowed_sessions', []),
+            llm_hook_include_v2=runtime_internal_settings.get('llm_hook_include_v2', True),
+            llm_hook_local_only=runtime_internal_settings.get('llm_hook_local_only', False),
             llm_hook_context_timeout=float(runtime_internal_settings.get('llm_hook_context_timeout', 3.0)),
             enable_command_pass_through=runtime_internal_settings.get(
                 'enable_command_pass_through', True

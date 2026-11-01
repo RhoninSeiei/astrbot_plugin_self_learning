@@ -110,6 +110,10 @@ class LLMHookHandler:
                 logger.debug("[LLM Hook] 总开关未启用，跳过上下文注入")
                 return
 
+            allowed_sessions = getattr(self._config, "llm_hook_allowed_sessions", [])
+            if allowed_sessions and getattr(event, "unified_msg_origin", None) not in allowed_sessions:
+                return
+
             # 命令/系统级唤醒词消息直接放行：命令回复追求即时响应，
             # 上下文注入对命令处理没有价值，反而会占用最长 3s 的预算。
             if getattr(self._config, "enable_command_pass_through", True):
@@ -297,7 +301,7 @@ class LLMHookHandler:
                 include_mood=False,
                 include_expression_patterns=self._config.enable_expression_patterns,
                 include_psychological=True,
-                include_behavior_guidance=social_enabled,
+                include_behavior_guidance=social_enabled and not getattr(self._config, "llm_hook_local_only", False),
                 include_conversation_goal=self._config.enable_goal_driven_chat,
                 enable_protection=True,
             )
@@ -309,7 +313,9 @@ class LLMHookHandler:
     async def _fetch_v2(
         self, prompt: str, group_id: str
     ) -> Optional[Dict[str, Any]]:
-        if not self._v2_integration:
+        if (getattr(self._config, "llm_hook_local_only", False)
+                or not getattr(self._config, "llm_hook_include_v2", True)
+                or not self._v2_integration):
             return None
         try:
             result = await self._v2_integration.get_enhanced_context(
