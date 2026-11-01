@@ -37,7 +37,7 @@ from ..monitoring.instrumentation import monitored
 _LIGHTRAG_AVAILABLE = False
 try:
     from lightrag import LightRAG, QueryParam
-    from lightrag.utils import EmbeddingFunc
+    from lightrag.utils import EmbeddingFunc, compute_mdhash_id, sanitize_text_for_encoding
 
     _LIGHTRAG_AVAILABLE = True
 except ImportError:
@@ -97,6 +97,7 @@ class LightRAGKnowledgeManager:
 
         # Per-group initialisation locks to prevent concurrent creation.
         self._init_locks: Dict[str, asyncio.Lock] = {}
+        self._ingestion_locks: Dict[str, asyncio.Lock] = {}
 
         # Base directory for all LightRAG data.
         self._base_dir = os.path.join(config.data_dir, "lightrag")
@@ -191,33 +192,81 @@ class LightRAGKnowledgeManager:
 
     async def process_message_for_knowledge_graph(
         self, message: MessageData, group_id: str
-    ) -> None:
-        """Extract entities/relations from a message and insert into the graph.
+    ) -> str:
+        """Durably hand off once; return knowledge status, not style success.
 
-        This is the primary entry point, matching the legacy
-        ``KnowledgeGraphManager.process_message_for_knowledge_graph`` name
-        for drop-in compatibility.
+        Native content IDs preserve compatibility with earlier ainsert(text)
+        calls and do not depend on different realtime/platform/database IDs.
+        Failed records remain inspectable; never re-enqueue or reset them here.
         """
+        if not group_id or str(message.group_id) != str(group_id):
+            raise ValueError("Knowledge ingestion group scope mismatch")
         if not message.message or len(message.message.strip()) < 10:
-            return
-
-        text = f"[{message.sender_name}]: {message.message}"
-        try:
+            return "skipped"
+        text = sanitize_text_for_encoding(f"[{message.sender_name}]: {message.message}")
+        doc_id = compute_mdhash_id(text, prefix="doc-")
+        async with self._ingestion_locks.setdefault(group_id, asyncio.Lock()):
             rag = await self._get_rag(group_id)
-            await rag.ainsert(text)
-            self._processed_counts[group_id] = (
-                self._processed_counts.get(group_id, 0) + 1
-            )
-        except Exception as exc:
-            logger.warning(
-                f"[LightRAG] Insert failed for group {group_id}: {exc}"
-            )
+            before = await rag.doc_status.get_by_id(doc_id)
+            status = (before or {}).get("status")
+            if status == "processed":
+                return "duplicate"
+            if status == "failed":
+                if await rag.full_docs.get_by_id(doc_id) is None:
+                    raise RuntimeError("LightRAG failed record has no recoverable document")
+                await rag.full_docs.index_done_callback()
+                await rag.doc_status.index_done_callback()
+                logger.warning("[LightRAG] Retained failed document group=%s doc=%s", group_id, doc_id)
+                return "failed"
+            try:
+                if before is None:
+                    await rag.ainsert(text, ids=doc_id)
+                else:
+                    # Resume the persisted document without another enqueue.
+                    await rag.apipeline_process_enqueue_documents()
+            except Exception as exc:
+                logger.warning("[LightRAG] Ingestion interrupted group=%s doc=%s error_type=%s", group_id, doc_id, type(exc).__name__)
+                if await rag.doc_status.get_by_id(doc_id) is None:
+                    raise  # No durable handoff: caller must retain raw messages.
+            after = await rag.doc_status.get_by_id(doc_id)
+            status = (after or {}).get("status")
+            if status == "processed":
+                self._processed_counts[group_id] = self._processed_counts.get(group_id, 0) + 1
+                self._stats_cache.pop(group_id, None)
+                return "processed"
+            if status in {"pending", "parsing", "analyzing", "processing", "preprocessed", "failed"}:
+                if await rag.full_docs.get_by_id(doc_id) is None:
+                    raise RuntimeError("LightRAG did not persist a recoverable document")
+                # A caught library error can leave only in-memory updates. Require
+                # both payload and status flush before acknowledging the handoff.
+                await rag.full_docs.index_done_callback()
+                await rag.doc_status.index_done_callback()
+                logger.warning("[LightRAG] Document persisted but not complete group=%s doc=%s status=%s", group_id, doc_id, status)
+                return str(getattr(status, "value", status))
+            raise RuntimeError("LightRAG did not persist a verifiable document status")
+
+    def persisted_group_ids(self) -> List[str]:
+        if not os.path.isdir(self._base_dir):
+            return []
+        return sorted(entry.name for entry in os.scandir(self._base_dir)
+                      if entry.is_dir(follow_symlinks=False)
+                      and SAFE_GROUP_ID_PATTERN.fullmatch(entry.name))
+
+    async def resume_pending_knowledge(self, group_id: str) -> None:
+        """Run the native pending/checkpoint queue, including empty raw batches."""
+        async with self._ingestion_locks.setdefault(group_id, asyncio.Lock()):
+            rag = await self._get_rag(group_id)
+            counts = await rag.doc_status.get_status_counts()
+            if any(counts.get(key, 0) for key in ("pending", "processing", "preprocessed")):
+                await rag.apipeline_process_enqueue_documents()
+            counts = await rag.doc_status.get_status_counts()
+            if counts.get("failed", 0):
+                logger.warning("[LightRAG] Persisted failed knowledge documents group=%s count=%s; no automatic re-enqueue", group_id, counts["failed"])
 
     async def process_message_for_knowledge(
         self, message: MessageData, group_id: str
-    ) -> None:
-        """Short alias for ``process_message_for_knowledge_graph``."""
-        await self.process_message_for_knowledge_graph(message, group_id)
+    ) -> str:
+        return await self.process_message_for_knowledge_graph(message, group_id)
 
     @monitored
     async def query_knowledge(
@@ -495,6 +544,8 @@ class LightRAGKnowledgeManager:
         Uses a per-group asyncio lock to prevent concurrent initialisation
         of the same group (TOCTOU race).
         """
+        if not SAFE_GROUP_ID_PATTERN.fullmatch(str(group_id)):
+            raise ValueError("Invalid LightRAG group scope")
         if group_id in self._instances:
             return self._instances[group_id]
 
@@ -512,7 +563,10 @@ class LightRAGKnowledgeManager:
             os.makedirs(working_dir, exist_ok=True)
 
             rag_kwargs: Dict[str, Any] = {
-                "working_dir": working_dir,
+                # Native stores use working_dir/workspace. This keeps the
+                # existing group directory while separating shared memory too.
+                "working_dir": self._base_dir,
+                "workspace": group_id,
                 "llm_model_func": self._make_llm_func(),
                 "chunk_token_size": 1200,
                 "chunk_overlap_token_size": 100,

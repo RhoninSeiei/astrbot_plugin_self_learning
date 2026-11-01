@@ -81,9 +81,11 @@ class ProgressiveLearningService:
         
         # 学习状态 - 使用字典管理每个群组的学习状态
         self.learning_active = {} # 改为字典，按群组ID管理
+        self._learning_tasks: Dict[str, asyncio.Task] = {}
         
         # 增量更新回调函数，降低耦合性
         self.update_system_prompt_callback = None
+        self.knowledge_ingestor = None
 
         self._group_sessions: Dict[str, LearningSession] = {}
         self.learning_sessions: List[LearningSession] = [] # 历史学习会话，可以从数据库加载
@@ -403,16 +405,16 @@ class ProgressiveLearningService:
                 
                 # 创建后台任务，确保不阻塞主线程
                 learning_task = asyncio.create_task(self._learning_loop_safe(group_id))
+                self._learning_tasks[group_id] = learning_task
                 
                 # 设置任务完成回调
                 def on_learning_complete(task):
-                    if task.exception():
+                    if self._learning_tasks.get(group_id) is task:
+                        self._learning_tasks.pop(group_id, None)
+                        self.learning_active[group_id] = False
+                    if not task.cancelled() and task.exception():
                         logger.error(f"群组 {group_id} 学习任务异常完成: {task.exception()}")
-                    else:
-                        logger.info(f"群组 {group_id} 学习任务正常完成")
-                    # 清除该群组的学习状态
-                    self.learning_active[group_id] = False
-                    
+
                 learning_task.add_done_callback(on_learning_complete)
                 
                 return True
@@ -425,32 +427,42 @@ class ProgressiveLearningService:
 
     async def stop_learning(self, group_id: str = None):
         """停止学习流程"""
-        if group_id:
-            # 停止特定群组的学习
-            self.learning_active[group_id] = False
-            logger.info(f"停止群组 {group_id} 的学习任务")
-        else:
-            # 停止所有群组的学习
-            for gid in list(self.learning_active.keys()):
-                self.learning_active[gid] = False
-            logger.info("停止所有群组的学习任务")
+        async with self.learning_lock:
+            if group_id:
+                # 停止特定群组的学习
+                self.learning_active[group_id] = False
+                logger.info(f"停止群组 {group_id} 的学习任务")
+            else:
+                # 停止所有群组的学习
+                for gid in list(self.learning_active.keys()):
+                    self.learning_active[gid] = False
+                logger.info("停止所有群组的学习任务")
         
-        if group_id:
-            session = self._group_sessions.pop(group_id, None)
-            if session:
-                session.end_time = datetime.now().isoformat()
-                session.success = True
-                await self.db_manager.save_learning_session_record(group_id, session.__dict__)
-                self.learning_sessions.append(session)
-                logger.info(f"学习会话结束: {session.session_id}")
-        else:
-            for gid, session in list(self._group_sessions.items()):
-                session.end_time = datetime.now().isoformat()
-                session.success = True
-                await self.db_manager.save_learning_session_record(gid, session.__dict__)
-                self.learning_sessions.append(session)
-                logger.info(f"学习会话结束: {session.session_id}")
-            self._group_sessions.clear()
+            # Own the actual loop task, not only the orchestrator's short wrapper.
+            tasks = [task for gid, task in list(self._learning_tasks.items())
+                     if (group_id is None or gid == group_id)
+                     and task is not asyncio.current_task() and not task.done()]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            if group_id:
+                session = self._group_sessions.pop(group_id, None)
+                if session:
+                    session.end_time = datetime.now().isoformat()
+                    session.success = True
+                    await self.db_manager.save_learning_session_record(group_id, session.__dict__)
+                    self.learning_sessions.append(session)
+                    logger.info(f"学习会话结束: {session.session_id}")
+            else:
+                for gid, session in list(self._group_sessions.items()):
+                    session.end_time = datetime.now().isoformat()
+                    session.success = True
+                    await self.db_manager.save_learning_session_record(gid, session.__dict__)
+                    self.learning_sessions.append(session)
+                    logger.info(f"学习会话结束: {session.session_id}")
+                self._group_sessions.clear()
 
     @monitored
     async def _learning_loop_safe(self, group_id: str):
@@ -485,6 +497,14 @@ class ProgressiveLearningService:
                 await self.db_manager.save_learning_session_record(group_id, session.__dict__)
             logger.info(f"学习循环结束 for group {group_id}")
 
+    async def _ingest_batch_knowledge(self, group_id: str, messages: list) -> None:
+        if getattr(self.config, "knowledge_engine", "legacy") != "lightrag":
+            return
+        callback = getattr(self, "knowledge_ingestor", None)
+        if callback is None:
+            raise RuntimeError("Scheduled LightRAG ingestion is not bound")
+        await callback(group_id, messages)
+
     @monitored
     async def _execute_learning_batch(self, group_id: str, relearn_mode: bool = False, from_force_learning: bool = False):
         """执行一个学习批次 - 集成强化学习
@@ -495,6 +515,7 @@ class ProgressiveLearningService:
         """
         try:
             batch_start_time = datetime.now()
+            await self._ingest_batch_knowledge(group_id, [])
 
             # 1. 获取消息（根据模式决定是否忽略"已处理"标记）
             if relearn_mode:
@@ -531,6 +552,7 @@ class ProgressiveLearningService:
                 return
 
             # 2.5 将筛选后的消息写入 FilteredMessage 表（供 WebUI 统计）
+            await self._ingest_batch_knowledge(group_id, filtered_messages)
             await self._save_filtered_messages_for_stats(group_id, filtered_messages)
 
             # 3. 获取当前人格设置 (针对特定群组)
@@ -644,6 +666,7 @@ class ProgressiveLearningService:
         """在后台执行学习批次 - 使用线程池避免阻塞主协程"""
         try:
             batch_start_time = datetime.now()
+            await self._ingest_batch_knowledge(group_id, [])
             
             # 1. 异步获取数据
             unprocessed_messages = await self.message_collector.get_unprocessed_messages(
@@ -678,6 +701,7 @@ class ProgressiveLearningService:
                 await self._mark_messages_processed(unprocessed_messages)
                 return
 
+            await self._ingest_batch_knowledge(group_id, filtered_messages)
             await self._save_filtered_messages_for_stats(group_id, filtered_messages)
 
             # 3. 分析风格并生成候选人格更新；失败时保留统计和风格学习降级记录

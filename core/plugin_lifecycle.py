@@ -162,6 +162,11 @@ class PluginLifecycle:
                     )
                     p.v2_integration = None
 
+            if p.progressive_learning and p.v2_integration:
+                p.progressive_learning.knowledge_ingestor = (
+                    p.v2_integration.ingest_scheduled_knowledge
+                )
+
             # ------ 依赖后创建的服务 ------
             if p.feature_delegation.should_delegate_reply():
                 p.intelligent_responder = None
@@ -459,6 +464,11 @@ class PluginLifecycle:
                         groups = await p._group_orchestrator.get_active_groups()
                         if groups:
                             await v2.warmup(groups)
+                        if plugin_config.enable_auto_learning:
+                            await v2.resume_scheduled_knowledge(
+                                p.qq_filter.get_allowed_group_ids(),
+                                p.qq_filter.get_blocked_group_ids(),
+                            )
                     except Exception as exc:
                         logger.debug(f"V2 warmup failed: {exc}")
 

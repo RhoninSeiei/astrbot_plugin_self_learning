@@ -119,7 +119,7 @@ class MessagePipeline:
     ) -> dict:
         """Preserve source metadata for regular samples and context-only turns."""
         try:
-            sender_name = clean_db_text(event.get_sender_name())
+            sender_name = clean_db_text(event.get_sender_name()) or sender_id
         except Exception as name_error:
             logger.debug(f"获取发送者昵称失败，回退为 sender_id: {name_error}")
             sender_name = sender_id
