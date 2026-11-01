@@ -925,6 +925,24 @@
         "hint": "开启后每次回复前会并行拉取社交、记忆、黑话、few-shot 等上下文；默认关闭以避免高频模型调用",
         "default": false
       },
+      "llm_hook_allowed_sessions": {
+        "description": "LLM Hook 会话白名单",
+        "type": "list",
+        "hint": "填写完整 unified_msg_origin，仅这些会话注入学习上下文。空列表保留旧版全会话行为；总开关仍默认关闭。",
+        "default": []
+      },
+      "llm_hook_include_v2": {
+        "description": "LLM Hook 包含 V2 检索",
+        "type": "bool",
+        "hint": "关闭后跳过 LightRAG、Mem0 和 V2 重排序检索，保留本地社交、表达、已确认黑话和已批准 few-shot 上下文。可与会话白名单配合降低回复等待时间。",
+        "default": true
+      },
+      "llm_hook_local_only": {
+        "description": "LLM Hook 仅使用本地上下文",
+        "type": "bool",
+        "hint": "开启后同时跳过 V2 检索和社交行为指导的后台模型生成，保留数据库和缓存中的学习上下文。降低回复开销时推荐开启；优先于包含 V2 检索开关。",
+        "default": false
+      },
       "enable_command_pass_through": {
         "description": "命令消息直接放行",
         "type": "bool",

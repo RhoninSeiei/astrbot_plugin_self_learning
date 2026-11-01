@@ -26,6 +26,25 @@ from config import (
 
 @pytest.mark.unit
 @pytest.mark.config
+def test_scoped_runtime_adaptations_roundtrip_nested_config():
+    config = PluginConfig.create_from_config({
+        "Runtime_Internal_Settings": {
+            "enable_llm_hooks": True,
+            "llm_hook_allowed_sessions": " qq:GroupMessage:905956314 ",
+            "llm_hook_include_v2": False,
+            "llm_hook_local_only": True,
+        },
+    }, data_dir="/tmp/test")
+    assert config.enable_llm_hooks is True
+    assert config.llm_hook_allowed_sessions == ["qq:GroupMessage:905956314"]
+    assert config.llm_hook_include_v2 is False
+    assert config.llm_hook_local_only is True
+
+
+
+
+@pytest.mark.unit
+@pytest.mark.config
 class TestPluginConfigDefaults:
     """Test PluginConfig default value initialization."""
 
@@ -40,6 +59,9 @@ class TestPluginConfigDefaults:
         assert config.enable_realtime_v2_processing is False
         assert config.enable_realtime_expression_learning is False
         assert config.enable_llm_hooks is False
+        assert config.llm_hook_allowed_sessions == []
+        assert config.llm_hook_include_v2 is True
+        assert config.llm_hook_local_only is False
         assert config.enable_web_interface is True
         assert config.enable_webui_password is False
         assert config.webui_initial_password == ""

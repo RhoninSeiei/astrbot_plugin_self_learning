@@ -142,20 +142,17 @@ class WebUIManager:
         """on_load 阶段设置服务并启动。"""
         global _server_instance
 
-        if not self._config.enable_web_interface or not _server_instance:
-            if not self._config.enable_web_interface:
-                logger.info("WebUI 未启用，跳过启动")
-            if not _server_instance:
-                logger.info("WebUI 服务器未创建，跳过启动；如需使用请在插件设置页面手动安装 WebUI 依赖")
-            return
-
-        # 设置 WebUI 服务
+        # 内嵌插件页面也使用该容器；服务绑定不依赖独立 Web 服务器。
         astrbot_pm = await self._acquire_persona_manager()
         try:
             await self._setup_services(astrbot_pm, self._database_manager)
-            logger.info("Web 服务器插件服务设置完成")
+            logger.info("插件页面共享服务设置完成")
         except Exception as e:
             logger.error(f"设置 Web 服务器插件服务失败: {e}", exc_info=True)
+            return
+
+        if not self._config.enable_web_interface or not _server_instance:
+            logger.info("独立 WebUI 未启用或服务器未创建，保留内嵌页面服务并跳过监听")
             return
 
         # 启动服务器
