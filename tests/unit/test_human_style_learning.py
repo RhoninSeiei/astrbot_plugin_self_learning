@@ -476,6 +476,8 @@ async def test_non_target_capture_only_collects_group_style_context(sender_id, g
         assert payload["is_style_context"] is True
         assert payload["message_id"] == "source-id" and payload["is_bot_target"] is True
         assert payload["message"] == ("" if text_value == "/help" else text_value)
+    pipeline.process_learning.assert_not_awaited()
+    pipeline.process_affection.assert_not_awaited()
 
 
 def test_empty_sender_name_falls_back_without_losing_new_message_metadata():
@@ -491,5 +493,3 @@ def test_empty_sender_name_falls_back_without_losing_new_message_metadata():
     assert payload["message_id"] == "source-id"
     assert payload["is_style_context"] is False
     assert payload["is_bot_target"] is False
-    pipeline.process_learning.assert_not_awaited()
-    pipeline.process_affection.assert_not_awaited()

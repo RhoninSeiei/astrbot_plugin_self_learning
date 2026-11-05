@@ -204,13 +204,12 @@ class TestGoalManagerEmptyResponseShortCircuit:
         goal_manager._parse_array_fallback.assert_not_called()
 
     @pytest.mark.parametrize("sanitized", [None, "", "   \n"])
-    async def test_dynamic_stages_sanitized_to_empty_uses_base_without_json_parsing(
+    async def test_dynamic_stages_valid_json_bypasses_chat_sanitizer(
         self, goal_manager, sanitized
     ):
-        goal_manager.llm.refine_chat_completion = AsyncMock(return_value="some reply")
+        goal_manager.llm.refine_chat_completion = AsyncMock(return_value='["了解话题","自然交流"]')
         goal_manager.prompt_protection.sanitize_response.return_value = (sanitized, {})
         goal_manager.guardrails = MagicMock()
-        goal_manager._parse_array_fallback = MagicMock()
         base_stages = ["了解话题", "自然交流"]
 
         result = await goal_manager._plan_dynamic_stages(
@@ -218,8 +217,9 @@ class TestGoalManagerEmptyResponseShortCircuit:
         )
 
         assert result == base_stages
+        goal_manager.llm.refine_chat_completion.assert_awaited_once()
+        goal_manager.prompt_protection.sanitize_response.assert_not_called()
         goal_manager.guardrails.validate_and_clean_json.assert_not_called()
-        goal_manager._parse_array_fallback.assert_not_called()
 
     async def test_dynamic_stages_valid_response_keeps_generated_stages(self, goal_manager):
         goal_manager.llm.refine_chat_completion = AsyncMock(return_value='["破冰", "交流"]')

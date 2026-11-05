@@ -68,6 +68,7 @@ from self_learning_EterU.services.state.enhanced_interaction import (
 @pytest.mark.asyncio
 async def test_progressive_learning_fetches_unprocessed_messages_for_current_group():
     service = ProgressiveLearningService.__new__(ProgressiveLearningService)
+    service.config = SimpleNamespace(knowledge_engine="legacy")
     service.batch_size = 42
     service.message_collector = SimpleNamespace(
         get_unprocessed_messages=AsyncMock(return_value=[]),
