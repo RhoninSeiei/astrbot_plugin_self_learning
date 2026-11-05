@@ -37,10 +37,11 @@ def load_methods(path, class_name, names, **extra):
 
 class WebUIBindingTests(unittest.IsolatedAsyncioTestCase):
     async def check_binding(self, enabled, server):
-        cls, _ = load_methods("webui/manager.py", "WebUIManager", ["setup_and_start"], _server_instance=server)
+        cls, _ = load_methods("webui/manager.py", "WebUIManager", ["setup_and_start", "bind_services"], _server_instance=server)
         manager = cls()
         manager._config = SimpleNamespace(enable_web_interface=enabled)
         manager._database_manager = object()
+        manager._services_bound = False
         manager._acquire_persona_manager = AsyncMock(return_value="persona")
         manager._setup_services = AsyncMock()
         await manager.setup_and_start()
@@ -60,11 +61,12 @@ class WebUIBindingTests(unittest.IsolatedAsyncioTestCase):
         server.start.assert_awaited_once()
 
     async def test_failed_binding_does_not_start_server(self):
-        server = SimpleNamespace(start=AsyncMock())
-        cls, _ = load_methods("webui/manager.py", "WebUIManager", ["setup_and_start"], _server_instance=server)
+        server = SimpleNamespace(start=AsyncMock(), host="localhost", port=8080)
+        cls, _ = load_methods("webui/manager.py", "WebUIManager", ["setup_and_start", "bind_services"], _server_instance=server)
         manager = cls()
         manager._config = SimpleNamespace(enable_web_interface=True)
         manager._database_manager = None
+        manager._services_bound = False
         manager._acquire_persona_manager = AsyncMock(return_value=None)
         manager._setup_services = AsyncMock(side_effect=RuntimeError("binding failed"))
         await manager.setup_and_start()

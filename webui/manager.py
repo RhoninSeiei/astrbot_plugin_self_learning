@@ -189,7 +189,8 @@ class WebUIManager:
 
         # 容器绑定与服务器启停解耦：官方面板页只依赖容器，因此即使 WebUI 未启用
         # 或服务器未创建，也要先绑定，避免页面全部 section 报「未初始化」。
-        await self.bind_services()
+        if not await self.bind_services():
+            return
 
         if not self._config.enable_web_interface:
             logger.info("WebUI 未启用，跳过启动")
